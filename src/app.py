@@ -5,11 +5,14 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
-import os
+from datetime import datetime, time
 from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+import os
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -77,6 +80,73 @@ activities = {
     }
 }
 
+# In-memory schedule entries for lesson and extra events
+schedule_entries = []
+ALLOWED_DAYS = {
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
+}
+MAX_DAILY_LIMITS = {
+    "lesson": 12,
+    "extra": 6
+}
+
+
+class ScheduleEntry(BaseModel):
+    type: str
+    day: str
+    start_time: str
+    end_time: str
+    name: str
+    location: str = ""
+
+
+def parse_time(value: str) -> time:
+    try:
+        return datetime.strptime(value, "%H:%M").time()
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid time format: {value}. Use HH:MM.")
+
+
+def times_overlap(start_a: time, end_a: time, start_b: time, end_b: time) -> bool:
+    return start_a < end_b and start_b < end_a
+
+
+def validate_schedule_entry(entry: ScheduleEntry):
+    entry_type = entry.type.lower()
+    if entry_type not in MAX_DAILY_LIMITS:
+        raise HTTPException(status_code=400, detail="Type must be 'lesson' or 'extra'.")
+
+    if entry.day not in ALLOWED_DAYS:
+        raise HTTPException(status_code=400, detail="Day must be one of Monday through Sunday.")
+
+    start = parse_time(entry.start_time)
+    end = parse_time(entry.end_time)
+    if start >= end:
+        raise HTTPException(status_code=400, detail="Start time must be before end time.")
+
+    same_day_entries = [
+        existing for existing in schedule_entries
+        if existing["day"] == entry.day and existing["type"] == entry_type
+    ]
+
+    if len(same_day_entries) >= MAX_DAILY_LIMITS[entry_type]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Daily limit reached for {entry_type}s on {entry.day}."
+        )
+
+    for existing in same_day_entries:
+        existing_start = parse_time(existing["start_time"])
+        existing_end = parse_time(existing["end_time"])
+        if times_overlap(start, end, existing_start, existing_end):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"The new {entry_type} overlaps with an existing {entry_type} "
+                    f"from {existing['start_time']} to {existing['end_time']} on {entry.day}."
+                )
+            )
+
 
 @app.get("/")
 def root():
@@ -130,3 +200,19 @@ def unregister_from_activity(activity_name: str, email: str):
     # Remove student
     activity["participants"].remove(email)
     return {"message": f"Unregistered {email} from {activity_name}"}
+
+
+@app.get("/schedule/entries")
+def get_schedule_entries():
+    return schedule_entries
+
+
+@app.post("/schedule/entries")
+def add_schedule_entry(entry: ScheduleEntry):
+    """Add a schedule entry with validation for overlaps and daily limits."""
+    validate_schedule_entry(entry)
+    schedule_entries.append(entry.dict())
+    return {
+        "message": f"Added {entry.type} '{entry.name}' on {entry.day}.",
+        "entry": entry.dict()
+    }
